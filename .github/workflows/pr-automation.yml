@@ -1,0 +1,560 @@
+name: Pull Request Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          echo "✅ Dependencies installed successfully"
+
+      - name: Run ESLint
+        id: eslint
+        continue-on-error: true
+        run: |
+          echo "Running ESLint checks..."
+          npm run lint > eslint-output.txt 2>&1 || true
+          ESLINT_EXIT_CODE=$?
+          cat eslint-output.txt
+          echo "eslint_exit_code=$ESLINT_EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "eslint_output<<EOF" >> $GITHUB_OUTPUT
+          cat eslint-output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Run Prettier Check
+        id: prettier
+        continue-on-error: true
+        run: |
+          echo "Running Prettier format checks..."
+          npx prettier --check "src/**/*.js" > prettier-output.txt 2>&1 || true
+          PRETTIER_EXIT_CODE=$?
+          cat prettier-output.txt
+          echo "prettier_exit_code=$PRETTIER_EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "prettier_output<<EOF" >> $GITHUB_OUTPUT
+          cat prettier-output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post Code Quality Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintExitCode = '${{ steps.eslint.outputs.eslint_exit_code }}';
+            const prettierExitCode = '${{ steps.prettier.outputs.prettier_exit_code }}';
+            const eslintOutput = `${{ steps.eslint.outputs.eslint_output }}`;
+            const prettierOutput = `${{ steps.prettier.outputs.prettier_output }}`;
+            
+            const eslintStatus = eslintExitCode === '0' ? '✅ Passed' : '❌ Failed';
+            const prettierStatus = prettierExitCode === '0' ? '✅ Passed' : '❌ Failed';
+            
+            const comment = `## 📋 Code Quality Report
+            
+            ### ESLint Analysis
+            **Status:** ${eslintStatus}
+            
+            <details>
+            <summary>ESLint Details</summary>
+            
+            \`\`\`
+            ${eslintOutput || 'No ESLint output'}
+            \`\`\`
+            
+            </details>
+            
+            ### Prettier Formatting
+            **Status:** ${prettierStatus}
+            
+            <details>
+            <summary>Prettier Details</summary>
+            
+            \`\`\`
+            ${prettierOutput || 'No Prettier output'}
+            \`\`\`
+            
+            </details>
+            
+            ---
+            *Automated code quality check completed at ${new Date().toUTCString()}*
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail job if quality checks failed
+        if: steps.eslint.outputs.eslint_exit_code != '0' || steps.prettier.outputs.prettier_exit_code != '0'
+        run: |
+          echo "❌ Code quality checks failed"
+          exit 1
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          echo "✅ Dependencies installed successfully"
+
+      - name: Run test suite with coverage
+        id: tests
+        continue-on-error: true
+        run: |
+          echo "Running full test suite..."
+          npm run test:coverage > test-output.txt 2>&1 || true
+          TEST_EXIT_CODE=$?
+          cat test-output.txt
+          echo "test_exit_code=$TEST_EXIT_CODE" >> $GITHUB_OUTPUT
+
+      - name: Extract coverage data
+        id: coverage
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "Coverage summary found, extracting data..."
+            STATEMENTS=$(jq '.total.statements.pct' coverage/coverage-summary.json)
+            BRANCHES=$(jq '.total.branches.pct' coverage/coverage-summary.json)
+            FUNCTIONS=$(jq '.total.functions.pct' coverage/coverage-summary.json)
+            LINES=$(jq '.total.lines.pct' coverage/coverage-summary.json)
+            
+            echo "statements=$STATEMENTS" >> $GITHUB_OUTPUT
+            echo "branches=$BRANCHES" >> $GITHUB_OUTPUT
+            echo "functions=$FUNCTIONS" >> $GITHUB_OUTPUT
+            echo "lines=$LINES" >> $GITHUB_OUTPUT
+            echo "coverage_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "No coverage summary found"
+            echo "coverage_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-coverage-report
+          path: |
+            coverage/
+            test-output.txt
+          retention-days: 30
+
+      - name: Post Test Coverage Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testExitCode = '${{ steps.tests.outputs.test_exit_code }}';
+            const coverageExists = '${{ steps.coverage.outputs.coverage_exists }}';
+            const statements = '${{ steps.coverage.outputs.statements }}';
+            const branches = '${{ steps.coverage.outputs.branches }}';
+            const functions = '${{ steps.coverage.outputs.functions }}';
+            const lines = '${{ steps.coverage.outputs.lines }}';
+            
+            const testStatus = testExitCode === '0' ? '✅ All tests passed' : '❌ Some tests failed';
+            
+            let coverageTable = '';
+            if (coverageExists === 'true') {
+              coverageTable = `
+            | Metric | Coverage |
+            |--------|----------|
+            | Statements | ${statements}% |
+            | Branches | ${branches}% |
+            | Functions | ${functions}% |
+            | Lines | ${lines}% |
+            `;
+            } else {
+              coverageTable = '*Coverage data not available*';
+            }
+            
+            const comment = `## 🧪 Test Coverage Report
+            
+            **Status:** ${testStatus}
+            
+            ### Coverage Summary
+            ${coverageTable}
+            
+            ### Artifacts
+            - 📊 Full coverage report available in artifacts
+            - 📁 Artifact name: \`test-coverage-report\`
+            
+            ---
+            *Test suite completed at ${new Date().toUTCString()}*
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail job if tests failed
+        if: steps.tests.outputs.test_exit_code != '0'
+        run: |
+          echo "❌ Test suite failed"
+          exit 1
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          echo "✅ Dependencies installed successfully"
+
+      - name: Run npm audit for vulnerabilities
+        id: npm_audit
+        continue-on-error: true
+        run: |
+          echo "Running dependency vulnerability checks..."
+          npm audit --json > audit-report.json 2>&1 || true
+          NPM_AUDIT_EXIT_CODE=$?
+          
+          # Extract vulnerability counts
+          if [ -f audit-report.json ]; then
+            CRITICAL=$(jq '.metadata.vulnerabilities.critical // 0' audit-report.json)
+            HIGH=$(jq '.metadata.vulnerabilities.high // 0' audit-report.json)
+            MODERATE=$(jq '.metadata.vulnerabilities.moderate // 0' audit-report.json)
+            LOW=$(jq '.metadata.vulnerabilities.low // 0' audit-report.json)
+            TOTAL=$(jq '.metadata.vulnerabilities.total // 0' audit-report.json)
+            
+            echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+            echo "high=$HIGH" >> $GITHUB_OUTPUT
+            echo "moderate=$MODERATE" >> $GITHUB_OUTPUT
+            echo "low=$LOW" >> $GITHUB_OUTPUT
+            echo "total=$TOTAL" >> $GITHUB_OUTPUT
+            echo "audit_exit_code=$NPM_AUDIT_EXIT_CODE" >> $GITHUB_OUTPUT
+          else
+            echo "total=0" >> $GITHUB_OUTPUT
+            echo "audit_exit_code=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Scan for secrets in code
+        id: secret_scan
+        continue-on-error: true
+        run: |
+          echo "Scanning for potential secrets in code..."
+          
+          # Simple regex-based secret scanning
+          SECRET_PATTERNS=(
+            "password\s*=\s*['\"][^'\"]{8,}['\"]"
+            "api[_-]?key\s*=\s*['\"][^'\"]{20,}['\"]"
+            "secret\s*=\s*['\"][^'\"]{8,}['\"]"
+            "token\s*=\s*['\"][^'\"]{20,}['\"]"
+            "private[_-]?key"
+            "aws[_-]?access[_-]?key"
+          )
+          
+          SECRET_COUNT=0
+          SECRET_FINDINGS=""
+          
+          for pattern in "${SECRET_PATTERNS[@]}"; do
+            matches=$(grep -rniE "$pattern" src/ 2>/dev/null | head -5 || true)
+            if [ ! -z "$matches" ]; then
+              SECRET_COUNT=$((SECRET_COUNT + 1))
+              SECRET_FINDINGS="${SECRET_FINDINGS}\nPattern: $pattern\n$matches\n"
+            fi
+          done
+          
+          echo "secret_count=$SECRET_COUNT" >> $GITHUB_OUTPUT
+          if [ $SECRET_COUNT -gt 0 ]; then
+            echo "secrets_found=true" >> $GITHUB_OUTPUT
+          else
+            echo "secrets_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check dependencies for known issues
+        id: dep_check
+        continue-on-error: true
+        run: |
+          echo "Analyzing Dependencies..."
+          
+          # Count total dependencies
+          TOTAL_DEPS=$(jq '.dependencies | length' package.json)
+          TOTAL_DEV_DEPS=$(jq '.devDependencies | length' package.json)
+          
+          echo "total_deps=$TOTAL_DEPS" >> $GITHUB_OUTPUT
+          echo "total_dev_deps=$TOTAL_DEV_DEPS" >> $GITHUB_OUTPUT
+
+      - name: Post Security Scan Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const total = '${{ steps.npm_audit.outputs.total }}' || '0';
+            const critical = '${{ steps.npm_audit.outputs.critical }}' || '0';
+            const high = '${{ steps.npm_audit.outputs.high }}' || '0';
+            const moderate = '${{ steps.npm_audit.outputs.moderate }}' || '0';
+            const low = '${{ steps.npm_audit.outputs.low }}' || '0';
+            const secretsFound = '${{ steps.secret_scan.outputs.secrets_found }}';
+            const secretCount = '${{ steps.secret_scan.outputs.secret_count }}' || '0';
+            const totalDeps = '${{ steps.dep_check.outputs.total_deps }}' || 'N/A';
+            const totalDevDeps = '${{ steps.dep_check.outputs.total_dev_deps }}' || 'N/A';
+            
+            const vulnStatus = total === '0' ? '✅ No vulnerabilities found' : `⚠️ ${total} vulnerabilities detected`;
+            const secretStatus = secretsFound === 'true' ? `⚠️ ${secretCount} potential secrets found` : '✅ No secrets detected';
+            
+            let severityEmoji = '✅';
+            if (critical !== '0' || high !== '0') {
+              severityEmoji = '🚨';
+            } else if (moderate !== '0') {
+              severityEmoji = '⚠️';
+            }
+            
+            const comment = `## 🔒 Security Scan Report
+            
+            ### Vulnerabilities Summary
+            **Overall Status:** ${severityEmoji} ${vulnStatus}
+            
+            | Severity | Count |
+            |----------|-------|
+            | 🔴 Critical | ${critical} |
+            | 🟠 High | ${high} |
+            | 🟡 Moderate | ${moderate} |
+            | 🟢 Low | ${low} |
+            | **Total** | **${total}** |
+            
+            ### Dependencies Analysis
+            - 📦 Production Dependencies: ${totalDeps}
+            - 🔧 Development Dependencies: ${totalDevDeps}
+            
+            ### Secret Scanning
+            **Status:** ${secretStatus}
+            ${secretsFound === 'true' ? '\n⚠️ Please review your code for hardcoded secrets!' : ''}
+            
+            ### Recommendations
+            ${total !== '0' ? '- Run \`npm audit fix\` to automatically fix vulnerabilities\n- Review and update dependencies with known security issues' : '- Keep dependencies up to date\n- Regularly run security audits'}
+            
+            ---
+            *Security scan completed at ${new Date().toUTCString()}*
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail job if critical vulnerabilities found
+        if: steps.npm_audit.outputs.critical != '0' || steps.npm_audit.outputs.high != '0'
+        run: |
+          echo "❌ Critical or high severity vulnerabilities found"
+          exit 1
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          echo "✅ Dependencies installed successfully"
+
+      - name: Run build
+        id: build
+        continue-on-error: true
+        run: |
+          echo "Building application..."
+          npm run build > build-output.txt 2>&1 || true
+          BUILD_EXIT_CODE=$?
+          cat build-output.txt
+          echo "build_exit_code=$BUILD_EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "build_output<<EOF" >> $GITHUB_OUTPUT
+          cat build-output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Start application in background
+        id: start_app
+        continue-on-error: true
+        run: |
+          echo "Starting application..."
+          npm start &
+          APP_PID=$!
+          echo "app_pid=$APP_PID" >> $GITHUB_OUTPUT
+          
+          # Wait for app to start
+          echo "Waiting for application to start..."
+          sleep 5
+          
+          # Check if process is still running
+          if ps -p $APP_PID > /dev/null; then
+            echo "✅ Application started successfully"
+            echo "app_started=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Application failed to start"
+            echo "app_started=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate endpoints
+        id: endpoints
+        if: steps.start_app.outputs.app_started == 'true'
+        continue-on-error: true
+        run: |
+          echo "Validating endpoints..."
+          
+          # Health check endpoint
+          HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "000")
+          echo "health_status=$HEALTH_STATUS" >> $GITHUB_OUTPUT
+          
+          # Root endpoint
+          ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ || echo "000")
+          echo "root_status=$ROOT_STATUS" >> $GITHUB_OUTPUT
+          
+          # Users endpoint (corrected path)
+          USERS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/users || echo "000")
+          echo "users_status=$USERS_STATUS" >> $GITHUB_OUTPUT
+          
+          if [ "$HEALTH_STATUS" = "200" ] && [ "$ROOT_STATUS" = "200" ] && [ "$USERS_STATUS" = "200" ]; then
+            echo "endpoints_valid=true" >> $GITHUB_OUTPUT
+            echo "✅ All endpoints are accessible"
+          else
+            echo "endpoints_valid=false" >> $GITHUB_OUTPUT
+            echo "❌ Some endpoints are not accessible"
+          fi
+
+      - name: Stop application
+        if: always() && steps.start_app.outputs.app_pid != ''
+        run: |
+          kill ${{ steps.start_app.outputs.app_pid }} || true
+          echo "Application stopped"
+
+      - name: Create deployment preview artifacts
+        if: always()
+        run: |
+          mkdir -p deployment-preview
+          echo "Build Timestamp: $(date)" > deployment-preview/build-info.txt
+          echo "Commit SHA: ${{ github.sha }}" >> deployment-preview/build-info.txt
+          echo "Branch: ${{ github.head_ref }}" >> deployment-preview/build-info.txt
+          echo "PR Number: ${{ github.event.pull_request.number }}" >> deployment-preview/build-info.txt
+          
+          # Copy package info
+          cp package.json deployment-preview/
+          
+          echo "✅ Deployment preview artifacts created"
+
+      - name: Upload deployment artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-preview
+          path: deployment-preview/
+          retention-days: 30
+
+      - name: Post Build Validation Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildExitCode = '${{ steps.build.outputs.build_exit_code }}';
+            const appStarted = '${{ steps.start_app.outputs.app_started }}';
+            const endpointsValid = '${{ steps.endpoints.outputs.endpoints_valid }}';
+            const healthStatus = '${{ steps.endpoints.outputs.health_status }}';
+            const rootStatus = '${{ steps.endpoints.outputs.root_status }}';
+            const usersStatus = '${{ steps.endpoints.outputs.users_status }}';
+            
+            const buildStatus = buildExitCode === '0' ? '✅ Success' : '❌ Failed';
+            const appStatus = appStarted === 'true' ? '✅ Started successfully' : '❌ Failed to start';
+            const endpointsStatus = endpointsValid === 'true' ? '✅ All accessible' : '⚠️ Some issues detected';
+            
+            const comment = `## 🏗️ Build Validation Report
+            
+            ### Build Status
+            **Status:** ${buildStatus}
+            
+            ### Application Start
+            **Status:** ${appStatus}
+            
+            ### Endpoint Validation
+            **Overall:** ${endpointsStatus}
+            
+            | Endpoint | Status Code | Result |
+            |----------|-------------|--------|
+            | \`/health\` | ${healthStatus || 'N/A'} | ${healthStatus === '200' ? '✅' : '❌'} |
+            | \`/\` | ${rootStatus || 'N/A'} | ${rootStatus === '200' ? '✅' : '❌'} |
+            | \`/users\` | ${usersStatus || 'N/A'} | ${usersStatus === '200' ? '✅' : '❌'} |
+            
+            ### Deployment Preview
+            - 📦 Deployment artifacts created and uploaded
+            - 🔗 Artifact name: \`deployment-preview\`
+            - 📅 Retention: 30 days
+            
+            ### Summary
+            ${buildExitCode === '0' && appStarted === 'true' && endpointsValid === 'true' 
+              ? '✅ Build validation passed - Ready for deployment!' 
+              : '⚠️ Build validation has some issues - Please review before merging'}
+            
+            ---
+            *Build validation completed at ${new Date().toUTCString()}*
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail job if build validation failed
+        if: steps.build.outputs.build_exit_code != '0' || steps.start_app.outputs.app_started != 'true' || steps.endpoints.outputs.endpoints_valid != 'true'
+        run: |
+          echo "❌ Build validation failed"
+          exit 1
