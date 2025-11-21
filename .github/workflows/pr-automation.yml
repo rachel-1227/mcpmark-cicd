@@ -459,8 +459,8 @@ jobs:
           ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ || echo "000")
           echo "root_status=$ROOT_STATUS" >> $GITHUB_OUTPUT
           
-          # Users endpoint
-          USERS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/users || echo "000")
+          # Users endpoint (corrected path)
+          USERS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/users || echo "000")
           echo "users_status=$USERS_STATUS" >> $GITHUB_OUTPUT
           
           if [ "$HEALTH_STATUS" = "200" ] && [ "$ROOT_STATUS" = "200" ] && [ "$USERS_STATUS" = "200" ]; then
@@ -530,7 +530,7 @@ jobs:
             |----------|-------------|--------|
             | \`/health\` | ${healthStatus || 'N/A'} | ${healthStatus === '200' ? '✅' : '❌'} |
             | \`/\` | ${rootStatus || 'N/A'} | ${rootStatus === '200' ? '✅' : '❌'} |
-            | \`/api/users\` | ${usersStatus || 'N/A'} | ${usersStatus === '200' ? '✅' : '❌'} |
+            | \`/users\` | ${usersStatus || 'N/A'} | ${usersStatus === '200' ? '✅' : '❌'} |
             
             ### Deployment Preview
             - 📦 Deployment artifacts created and uploaded
